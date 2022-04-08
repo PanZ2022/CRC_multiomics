@@ -1,0 +1,352 @@
+---
+title: "Proteomics differently expressed analysis between adenoma and paired normal tissue"
+output: html_document
+date: '2022-04-06'
+author: 'Pan Zhang'
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library("Biostrings")
+library(ggfortify)
+library(VennDiagram)
+
+reformat <- function(m){
+  norm_normal_ratio <- c()
+  norm_adenoma_ratio  <-c()
+  normal_ratio <-c()
+  adenoma_ratio <-c()
+  normal_intensity <-c()
+  adenoma_intensity <-c()
+  for (i in 1:3){
+    n_name <- paste0("Norm_iTRAQ_ratio_", 2*i)
+    a_name <- paste0("Norm_iTRAQ_ratio_", 2*i+1)
+    norm_normal_ratio  <- append(norm_normal_ratio , m[,n_name])
+    norm_adenoma_ratio  <- append(norm_adenoma_ratio , m[,a_name])
+    #normal_ratio <- append(normal_ratio, m[,paste0("iTRAQ_ratio_", 2*i)])
+    #adenoma_ratio <- append(adenoma_ratio, m[,paste0("iTRAQ_ratio_", 2*i+1)])
+    normal_intensity <- append(normal_intensity, m[,paste0("iTRAQ_intensity_", 2*i)])
+    adenoma_intensity <- append(adenoma_intensity, m[,paste0("iTRAQ_intensity_", 2*i+1)])
+  }
+  return(list(norm_normal_ratio,norm_adenoma_ratio,normal_intensity, adenoma_intensity))
+}
+
+
+paired_T_test <- function(m){
+  d <- reformat(m)
+  norm_normal_ratio <- as.numeric(unlist(d[1]))
+  norm_adenoma_ratio  <-as.numeric(unlist(d[2]))
+  #normal_ratio <-c()
+  #adenoma_ratio <-c()
+  normal_intensity <-as.numeric(unlist(d[3]))
+  adenoma_intensity <-as.numeric(unlist(d[4]))
+
+  fct <- cal_factor(normal_intensity, adenoma_intensity)
+  p_value <- t.test(norm_normal_ratio , norm_adenoma_ratio , paired = TRUE, alternative = "two.sided")$p.value
+  fold_change <- mean(as.numeric(gsub(Inf, NA , adenoma_intensity/(normal_intensity+0.1))),na.rm = TRUE)
+  #fold_change <- mean(as.numeric(adenoma_ratio/(normal_ratio+0.01)),na.rm = TRUE)
+  n_exp <- dim(m)[1]
+  metric <- fold_change*fct
+  return(list(n_exp, fold_change,metric, p_value))  
+  
+}
+
+cal_factor <- function(normal_intensity, adenoma_intensity){
+  ControlProp<- as.numeric(table(normal_intensity> 0)['TRUE'])/length(normal_intensity)
+  
+  CancerProp <- as.numeric(table(adenoma_intensity >0)['TRUE'])/length(adenoma_intensity)
+  factor <- ControlProp
+  
+  if (is.na(ControlProp)){
+    fct <- CancerProp/0.01
+  }else{
+    fct <- CancerProp/ControlProp
+  }
+  return(fct)
+}
+```
+
+## Read data
+```{r}
+setwd("/Users/panzhang/Desktop/GGD_work/CRC/CRC_paper/proteomics_adenomas2")
+mydata <- read.delim("CRC_proteomics_adenomas2.txt")
+dim(mydata)
+colnames(mydata)
+table(mydata$ExperimentInformation)
+mydata <- mydata[which(mydata$iTRAQ_ratio_1 != "---" ),]
+dim(mydata)
+mydata <- mydata[which(mydata$iTRAQ_ratio_1 > 0),]
+dim(mydata)
+length(unique(mydata$proteinAccession))
+
+#all_protein <- as.data.frame(unique(mydata$proteinAccession))
+#write.table(all_protein, file = "all_protein.txt", quote = FALSE,row.names = F, col.names = F)
+
+```
+
+
+## Generate protein-gene mapping file
+```{r}
+fa = readAAStringSet("uniprot-yourlist_M202204084ABAA9BC7178C81CEBC9459510EDDEA349650D2.fasta")
+want_names = sapply(strsplit(names(fa),"\\|"),"[[",2)
+want_description <- sapply(strsplit(names(fa),"\\|"),"[[",3)
+foo <- data.frame(do.call('rbind', strsplit(as.character(want_description),'GN=|PE=')))
+geneName <- gsub("=", NA, foo$X2) 
+proteinToGene <- cbind(geneName,want_description)
+rownames(proteinToGene) <- want_names
+
+```
+
+
+## Data filtering
+### Negative peptide ratio
+##### 1. Caused by missing reporter ion peak
+#####  2. Isotope purity correction then ‘corrects’ to negative
+#####  3. Not used in the protein ratio
+#####  4. Flags up that there is a problem with peak detection
+```{r}
+df <- mydata[,c(1:2,4, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52 )]
+dim(df)
+
+# Filter the peptides aren't detected in reference 113 and 114 
+df <- df[which(df$iTRAQ_ratio_1 >0),]
+dim(df)
+
+### Replace negative intensity and ratio to 0
+df[df <0] <- 0
+colnames(df)
+```
+
+
+## Calculate intesity at protein level
+```{r}
+data_group <- df %>%                                
+  group_by(ExperimentInformation, proteinAccession) %>%
+  summarise(iTRAQ_intensity_0 = sum(iTRAQ_intensity_1),
+            iTRAQ_intensity_1 = sum(iTRAQ_intensity_0), 
+            iTRAQ_intensity_2 = sum(iTRAQ_intensity_2),
+            iTRAQ_intensity_3 = sum(iTRAQ_intensity_3),
+            iTRAQ_intensity_4 = sum(iTRAQ_intensity_4),
+            iTRAQ_intensity_5 = sum(iTRAQ_intensity_5),
+            iTRAQ_intensity_6 = sum(iTRAQ_intensity_6),
+            iTRAQ_intensity_7 = sum(iTRAQ_intensity_7)) %>% 
+  as.data.frame()
+dim(data_group) 
+colnames(data_group)
+
+```
+
+
+## Log transformed  & visualization 
+```{r}
+par(mfcol=c(3,3))
+for (i in 1:7){
+  n_ratio <- paste0("iTRAQ_ratio_", i)
+  n_ratio_norm <- paste0("Norm_iTRAQ_ratio_", i)
+  n_ratio_log <- paste0("Log_iTRAQ_ratio_", i)
+  data_group[n_ratio] <- data_group[, i+3]/data_group[,3]
+  data_group[n_ratio_log] <- log2(data_group[, n_ratio] + 0.01)
+  data_group[n_ratio_norm] <- data_group[, n_ratio_log]-median(data_group[,n_ratio_log])
+  if(i>1){
+    hist(data_group[,n_ratio_log], breaks = 100, freq=FALSE) 
+  }
+}
+
+colnames(data_group)
+head(data_group)
+```
+
+
+## PCA plot 
+#### PC1 vs PC2
+```{r}
+expr.pca <- t(df[,11:18])
+dim(expr.pca)
+
+#PCA is based on original abundance after removing protein doesn't express across all samples
+expr.pca <- expr.pca[, apply(expr.pca, 2, var, na.rm = T) != 0]
+dim(expr.pca)
+expr.pca <- prcomp(expr.pca, center = T, scale. = T)
+
+expr_plot<-as.data.frame(t(df[,11:18]))
+
+expr_plot["group_all"] <- factor(c(rep("Ref",2),rep(c("N","A"),3)))
+dim(expr_plot)
+#par(mfcol=c(2,2))
+#plot1 <- autoplot(expr.pca, data = expr_plot,colour = "group_all")
+plot2 <- autoplot(expr.pca, data = expr_plot,colour = "group_all", label.size = 3, label = TRUE, )
+#grid.arrange(plot1, plot2, nrow=2, ncol=1, heights=c(2,2))
+#plot1
+plot2
+```
+
+## Paired T test on median normalized log2(Ratio)
+```{r}
+proteins <- unique(data_group$proteinAccession)
+length(proteins)
+
+r <-c()
+for (p in proteins){
+  m <- data_group[which(data_group$proteinAccession == p),]
+  t <- as.numeric(paired_T_test(m))
+  r <- rbind(r, append(p, t))
+}
+
+r <- as.data.frame(r)
+
+# add BH adjusted p value
+result <- cbind(r, p.adjust(r$V5, "BH"), log2(as.numeric(r$V3)),log2(as.numeric(r$V4)))
+rownames(result) <- result$V1
+```
+
+
+## Add gene name and description 
+```{r}
+s <- strsplit(result$V1, "-")
+p<-c()
+for (ss in s){
+  p<-append(p, unlist(ss)[1])
+}
+
+desp<-c()
+for(pp in p){
+     if (pp %in% rownames(proteinToGene) ){
+       desp <-rbind( desp, proteinToGene[pp,])
+     }else{
+       desp <-rbind(desp,c("NA", "NA"))
+     }
+}
+
+output <- cbind(result, desp)
+  
+
+colnames(output) <- c("proteinAccession", "N_experiment", "fold change", "metric", "P-value",
+                 "BH adjusted P-value", "LogFC", "LogMetric", "Gene", "Description")
+
+#write.table(output, "CRC_proteomics_adenomas2_ADK_VS_Control.txt", quote = F, sep = "\t", row.names = F)
+
+#head(as.data.frame(output))
+```
+
+
+## Volcano plot
+```{r}
+data <- as.data.frame(output)
+colnames(data)
+colnames(data)[6] <- "FDR"
+colnames(data)[7] <- "logFC"
+lfc <- as.numeric(gsub(Inf, NA, data$logFC))
+
+
+data$color <- ifelse(data$FDR <= 0.05 & abs(data$logFC)>= 1,ifelse(data$logFC >= 1,'red','green'),'grey')
+color <- c(red = "red",grey = "grey",green = "green")
+t_color <- table(data$color)
+n_up <- as.numeric(t_color['red'])
+n_down <- as.numeric(t_color['green'])
+
+p <- ggplot(data, aes(logFC, -log10(FDR), col = color)) +
+  geom_point() +
+  theme_bw() +
+  scale_color_manual(name = "", values = color, label= c("Down", "N.S.","Up")) +
+  labs(x="log2 fold change: Group Adenoma VS Normal",y="-log10 BH adjusted p-values") +
+  geom_hline(yintercept = -log10(0.05), lty=4,col="grey",lwd=0.4) +
+  geom_vline(xintercept = c(-1, 1), lty=4,col="grey",lwd=0.4) +
+  #annote some genes
+  geom_text(aes(label=ifelse(FDR < 1e-10, as.character(Gene),'')),hjust=0, vjust=0)+
+  theme(#legend.position = 'None',
+    panel.grid=element_blank(),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 14))+
+  ggtitle("Volcano Plot Significance: Log2FC 1 BHP 0.05")+
+  
+  annotate("text", x= -max(abs(min(lfc, na.rm = TRUE)), max(lfc, na.rm = TRUE))-3, y=max(-log10(data$FDR))+5 ,label=as.character(n_down),col = "green" )+
+  annotate("text", x= max(abs(min(lfc, na.rm = TRUE)), max(lfc, na.rm = TRUE))+3, y=max(-log10(data$FDR))+5 ,label=as.character(n_up),col = "red" )
+
+  
+p
+```
+
+```{r}
+colnames(data)[7] <- "LogFC"
+colnames(data)[8] <- "logFC"
+
+data$color <- ifelse(data$FDR <= 0.05 & abs(data$logFC)>= 1,ifelse(data$logFC >= 1,'red','green'),'grey')
+color <- c(red = "red",grey = "grey",green = "green")
+t_color <- table(data$color)
+n_up <- as.numeric(t_color['red'])
+n_down <- as.numeric(t_color['green'])
+
+p <- ggplot(data, aes(logFC, -log10(FDR), col = color)) +
+  geom_point() +
+  theme_bw() +
+  scale_color_manual(name = "", values = color, label= c("Down", "N.S.","Up")) +
+  labs(x="log2 Metric: Group Adenoma VS Normal",y="-log10 BH adjusted p-values") +
+  geom_hline(yintercept = -log10(0.05), lty=4,col="grey",lwd=0.4) +
+  geom_vline(xintercept = c(-1, 1), lty=4,col="grey",lwd=0.4) +
+  #annote some genes
+  geom_text(aes(label=ifelse(FDR < 1e-10, as.character(Gene),'')),hjust=0, vjust=0)+
+  theme(#legend.position = 'None',
+    panel.grid=element_blank(),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 14))+
+  ggtitle("Volcano Plot Significance: Log2Metric 1 BHP 0.05")+
+  
+  annotate("text", x= -max(abs(min(lfc, na.rm = TRUE)), max(lfc, na.rm = TRUE))-3, y=max(-log10(data$FDR))+5 ,label=as.character(n_down),col = "green" )+
+  annotate("text", x= max(abs(min(lfc, na.rm = TRUE)), max(lfc, na.rm = TRUE))+3, y=max(-log10(data$FDR))+5 ,label=as.character(n_up),col = "red" )
+
+  
+p
+
+```
+## Protein frequency
+```{r}
+np <- as.data.frame(table(output$N_experiment))
+barplot(np$Freq, col = "light blue", names.arg = np$Var1)
+```
+
+
+
+## Compare with DH vs ADK in Quesada-Calvo et al 2017
+```{r}
+
+ADK_VS_DHDI <- read.delim("/Users/panzhang/Desktop/GGD_work/CRC/CRC_paper/proteomics_adenomas3/CRC_proteomics_adenomas3_ADK_VS_DH&DI.txt")
+ADK_VS_DH <- read.delim("/Users/panzhang/Desktop/GGD_work/CRC/CRC_paper/proteomics_adenomas3/CRC_proteomics_adenomas3_ADK_VS_DH.txt")
+ADK_VS_DI <- read.delim("/Users/panzhang/Desktop/GGD_work/CRC/CRC_paper/proteomics_adenomas3/CRC_proteomics_adenomas3_ADK_VS_DI.txt")
+
+
+```
+
+```{r}
+gene_DHDI <- na.omit(ouput[which(ouput$`BH adjusted P-value`<0.05 & as.numeric(ADK_VS_DHDI$Metric) >1), ]$Gene)
+gene_DH <- ADK_VS_DH[which(ADK_VS_DH$Pvalue.anova<0.05 & as.numeric(ADK_VS_DH$Metric) >1), ]$Genes
+gene_DI <- ADK_VS_DI[which(ADK_VS_DI$Pvalue.anova<0.05 & as.numeric(ADK_VS_DI$Metric) >1), ]$Genes
+
+diag <- venn.diagram(x = list(
+  A = gene_DHDI,
+  B = gene_DI,
+  C = gene_DH
+  ), NULL, col = "transparent",
+  fill = c("cornflowerblue", "darkorchid1", "yellow"),
+  alpha = 0.50,
+  cex = 1,
+  fontfamily = "serif",
+  fontface = "bold",
+  category.names = c("" , "" , ""),
+  cat.col = c("darkblue", "darkgreen", "orange"),
+  cat.cex = 1.5,
+  cat.pos = 0,
+  cat.dist = 0.07,
+  cat.fontfamily = "serif",
+#rotation.degree = 270,
+  margin = 0.2,
+ )
+
+cols <- c("cornflowerblue", "darkorchid1", "yellow")
+lg <- legendGrob(labels=c("ADK vs Normal" , "ADK vs DI" , "ADK vs DH"  ), pch=rep(19,length(c("A","B"))),
+                 gp=gpar(col=cols, fill="gray"),
+                 byrow=TRUE)
+
+g <- gTree(children = gList(diag))
+gridExtra::grid.arrange(g, lg, ncol = 2, widths = c(4,1))
+
+```
